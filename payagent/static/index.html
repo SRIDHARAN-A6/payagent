@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PayAgent AI</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+<div class="max-w-4xl mx-auto p-4 space-y-5">
+
+  <header class="flex items-center justify-between flex-wrap gap-2">
+    <div>
+      <h1 class="text-2xl font-bold">PayAgent <span class="text-cyan-400">AI</span></h1>
+      <p class="text-slate-400 text-sm">Type a sentence. Get a real PayPal invoice.</p>
+    </div>
+    <div id="badges" class="flex gap-2 text-xs"></div>
+  </header>
+
+  <section class="bg-slate-900 rounded-xl p-4 space-y-3">
+    <div class="flex gap-2">
+      <input id="prompt" class="flex-1 rounded-lg bg-slate-800 px-3 py-2 outline-none focus:ring-2 ring-cyan-500"
+             placeholder="Invoice Ravi ₹4,000 for logo design, due Friday" />
+      <button id="go" class="bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-semibold px-4 rounded-lg">Send</button>
+    </div>
+    <div class="flex flex-wrap gap-2 text-xs" id="chips"></div>
+    <div id="reply" class="text-sm text-slate-300"></div>
+    <div id="draft"></div>
+  </section>
+
+  <section class="grid grid-cols-3 gap-3 text-center" id="stats"></section>
+
+  <section class="bg-slate-900 rounded-xl p-4">
+    <h2 class="font-semibold mb-3">Invoices</h2>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm">
+        <thead class="text-slate-400 text-left"><tr>
+          <th class="py-1">Client</th><th>Amount</th><th>Due</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <p id="empty" class="text-slate-500 text-sm py-4 hidden">No invoices yet. Try one of the examples above.</p>
+  </section>
+</div>
+
+<div id="modal" class="hidden fixed inset-0 bg-black/70 flex items-center justify-center p-4" onclick="this.classList.add('hidden')">
+  <div class="bg-white p-4 rounded-xl text-slate-900 text-center space-y-2" onclick="event.stopPropagation()">
+    <div id="qr" class="flex justify-center"></div>
+    <p class="text-xs">Scan to open the PayPal payment page</p>
+  </div>
+</div>
+
+<script>
+const SYM = {INR:"₹", USD:"$", EUR:"€", GBP:"£"};
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const money = (c, v) => (SYM[c] || c + " ") + Number(v).toLocaleString(undefined, {maximumFractionDigits: 2});
+let invoices = [];
+
+async function api(path, method = "GET", body) {
+  const r = await fetch(path, {method, headers: {"Content-Type": "application/json"}, body: body ? JSON.stringify(body) : undefined});
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.detail || r.statusText);
+  return data;
+}
+
+const EXAMPLES = [
+  "Invoice Ravi ₹4,000 for logo design, due Friday",
+  "Bill Priya $250 for website copy, due tomorrow",
+  "Who hasn't paid yet?",
+  "Remind Ravi"
+];
+$("chips").innerHTML = EXAMPLES.map(e => `<button class="chip bg-slate-800 hover:bg-slate-700 rounded-full px-3 py-1">${esc(e)}</button>`).join("");
+document.querySelectorAll(".chip").forEach(b => b.onclick = () => { $("prompt").value = b.textContent; send(); });
+
+async function loadHealth() {
+  const h = await api("/api/health");
+  $("badges").innerHTML =
+    `<span class="px-2 py-1 rounded ${h.paypal_live ? "bg-emerald-900 text-emerald-300" : "bg-amber-900 text-amber-300"}">PayPal: ${h.paypal_live ? "sandbox live" : "simulated"}</span>` +
+    `<span class="px-2 py-1 rounded ${h.ai === "gemini" ? "bg-emerald-900 text-emerald-300" : "bg-amber-900 text-amber-300"}">AI: ${h.ai}</span>`;
+}
+
+async function send() {
+  const prompt = $("prompt").value.trim();
+  if (!prompt) return;
+  $("go").disabled = true; $("reply").textContent = "Thinking…"; $("draft").innerHTML = "";
+  try {
+    const r = await api("/api/agent", "POST", {prompt});
+    $("reply").textContent = r.reply;
+    if (r.intent === "create_invoice") showDraft(r.draft);
+    await loadInvoices();
+  } catch (e) { $("reply").textContent = "Error: " + e.message; }
+  $("go").disabled = false;
+}
+
+function showDraft(d) {
+  const total = d.items.reduce((s, i) => s + i.quantity * i.unit_amount, 0);
+  $("draft").innerHTML = `
+    <div class="bg-slate-800 rounded-lg p-3 space-y-2 text-sm">
+      <div class="font-semibold">Review before sending</div>
+      <div>Client: <b>${esc(d.client_name)}</b> (${esc(d.client_email)})</div>
+      <div>${d.items.map(i => `${esc(i.name)} × ${i.quantity} — ${money(d.currency, i.unit_amount)}`).join("<br>")}</div>
+      <div>Total: <b>${money(d.currency, total)}</b> · Due: <b>${esc(d.due_date)}</b></div>
+      ${d.currency === "INR" ? '<div class="text-amber-300 text-xs">PayPal sandbox bills in USD; the INR amount is converted at a stated rate and noted on the invoice.</div>' : ""}
+      <button id="confirm" class="bg-emerald-500 hover:bg-emerald-400 text-slate-900 font-semibold px-3 py-1 rounded">Create PayPal invoice</button>
+    </div>`;
+  $("confirm").onclick = async () => {
+    $("confirm").disabled = true; $("confirm").textContent = "Creating…";
+    try {
+      await api("/api/invoices", "POST", d);
+      $("draft").innerHTML = ""; $("reply").textContent = "Invoice created ✔";
+      $("prompt").value = ""; await loadInvoices();
+    } catch (e) { $("reply").textContent = "Error: " + e.message; $("confirm").disabled = false; $("confirm").textContent = "Create PayPal invoice"; }
+  };
+}
+
+async function loadInvoices() { invoices = await api("/api/invoices"); render(); }
+
+function render() {
+  $("empty").classList.toggle("hidden", invoices.length > 0);
+  $("rows").innerHTML = invoices.map(i => {
+    const badge = {PAID: "bg-emerald-900 text-emerald-300", UNPAID: "bg-amber-900 text-amber-300", CANCELLED: "bg-slate-700 text-slate-300"}[i.status];
+    const link = i.payment_link ? `<a class="text-cyan-400 underline" target="_blank" href="${esc(i.payment_link)}">Open</a> <button class="text-cyan-400 underline" onclick="qr('${esc(i.payment_link)}')">QR</button>` : `<span class="text-slate-500">sim</span>`;
+    const unpaid = i.status === "UNPAID";
+    return `<tr class="border-t border-slate-800 align-top">
+      <td class="py-2">${esc(i.client_name)}<div class="text-xs text-slate-500">${esc(i.id)}</div></td>
+      <td>${money(i.currency, i.total_amount)}</td><td>${esc(i.due_date)}</td>
+      <td><span class="px-2 py-0.5 rounded text-xs ${badge}">${i.status}</span></td>
+      <td class="space-x-2 whitespace-nowrap">${link}
+        <button class="text-slate-300 underline" onclick="act('${esc(i.id)}','refresh')">Refresh</button>
+        ${unpaid ? `<button class="text-slate-300 underline" onclick="act('${esc(i.id)}','remind')">Remind</button>
+        <button class="text-slate-300 underline" onclick="act('${esc(i.id)}','mark-paid')">Mark paid</button>` : ""}
+      </td></tr>`;
+  }).join("");
+
+  const paid = invoices.filter(i => i.status === "PAID").length;
+  const outstanding = {};
+  invoices.filter(i => i.status === "UNPAID").forEach(i => outstanding[i.currency] = (outstanding[i.currency] || 0) + i.total_amount);
+  const out = Object.entries(outstanding).map(([c, v]) => money(c, v)).join(" · ") || "—";
+  $("stats").innerHTML = [["Invoices", invoices.length], ["Paid", paid], ["Outstanding", out]]
+    .map(([k, v]) => `<div class="bg-slate-900 rounded-xl p-3"><div class="text-slate-400 text-xs">${k}</div><div class="text-lg font-semibold">${v}</div></div>`).join("");
+}
+
+async function act(id, action) {
+  try { await api(`/api/invoices/${encodeURIComponent(id)}/${action}`, "POST"); await loadInvoices();
+        if (action === "remind") $("reply").textContent = "Reminder sent ✔"; }
+  catch (e) { $("reply").textContent = "Error: " + e.message; }
+}
+
+function qr(url) {
+  $("qr").innerHTML = ""; new QRCode($("qr"), {text: url, width: 200, height: 200});
+  $("modal").classList.remove("hidden");
+}
+
+$("go").onclick = send;
+$("prompt").addEventListener("keydown", e => { if (e.key === "Enter") send(); });
+loadHealth(); loadInvoices();
+</script>
+</body>
+</html>
